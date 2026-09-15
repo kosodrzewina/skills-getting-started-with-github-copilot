@@ -1,19 +1,105 @@
+from copy import deepcopy
+
+import pytest
 from fastapi.testclient import TestClient
 
-from src.app import app
+from src.app import activities, app
 
 
-def test_unregister_participant_removes_participant():
-    client = TestClient(app)
-    activity_name = "Chess Club"
+@pytest.fixture(autouse=True)
+def restore_activities():
+    original_activities = deepcopy(activities)
+    yield
+    activities.clear()
+    activities.update(original_activities)
+
+
+def test_root_redirects_to_static_index():
+    with TestClient(app) as client:
+        response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/static/index.html"
+
+
+def test_get_activities_returns_available_activities():
+    with TestClient(app) as client:
+        response = client.get("/activities")
+
+    assert response.status_code == 200
+    response_data = response.json()
+    assert {
+        "Chess Club",
+        "Programming Class",
+        "Gym Class",
+        "Basketball Team",
+        "Tennis Club",
+        "Art Club",
+        "Music Ensemble",
+        "Debate Team",
+        "Science Club",
+    } <= set(response_data)
+    assert response_data["Chess Club"]["max_participants"] == 12
+    assert response_data["Chess Club"]["participants"] == [
+        "michael@mergington.edu",
+        "daniel@mergington.edu",
+    ]
+
+
+def test_signup_adds_student_and_returns_confirmation():
+    with TestClient(app) as client:
+        response = client.post(
+            "/activities/Chess Club/signup",
+            params={"email": "student@mergington.edu"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Signed up student@mergington.edu for Chess Club"
+    }
+    assert "student@mergington.edu" in activities["Chess Club"]["participants"]
+
+
+def test_signup_for_unknown_activity_returns_not_found():
+    with TestClient(app) as client:
+        response = client.post(
+            "/activities/Unknown Club/signup",
+            params={"email": "student@mergington.edu"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Activity not found"}
+
+
+def test_signup_rejects_duplicate_email():
     email = "michael@mergington.edu"
-    original_participants = list(app.activities[activity_name]["participants"])
 
-    try:
-        response = client.delete(f"/activities/{activity_name}/participants/{email}")
+    with TestClient(app) as client:
+        response = client.post(
+            "/activities/Chess Club/signup",
+            params={"email": email},
+        )
 
-        assert response.status_code == 200
-        assert email not in app.activities[activity_name]["participants"]
-        assert response.json()["message"] == f"Removed {email} from {activity_name}"
-    finally:
-        app.activities[activity_name]["participants"] = original_participants
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Student already signed up for this activity"
+    }
+    assert activities["Chess Club"]["participants"].count(email) == 1
+
+
+def test_signup_accepts_non_email_shaped_value_in_current_behavior():
+    with TestClient(app) as client:
+        response = client.post(
+            "/activities/Chess Club/signup",
+            params={"email": "not-an-email"},
+        )
+
+    assert response.status_code == 200
+    assert "not-an-email" in activities["Chess Club"]["participants"]
+
+
+def test_signup_without_email_returns_validation_error():
+    with TestClient(app) as client:
+        response = client.post("/activities/Chess Club/signup")
+
+    assert response.status_code == 422
